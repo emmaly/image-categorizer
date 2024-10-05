@@ -11,7 +11,7 @@ import (
 	_ "image/jpeg"
 	"image/png"
 	"os"
-	"strconv"
+	sortPkg "sort"
 	"sync"
 
 	_ "github.com/joho/godotenv/autoload"
@@ -53,7 +53,8 @@ var (
 	workingDir      = os.Getenv("WORKING_DIR")
 	responseSchema  = &jsonschema.Definition{}
 	limiter         = NewLimiter(mustGetEnvInt("OPENAI_API_MAX_RPM", 10))
-	resizeTargets   = []uint{28, 56, 112, 256, 320}
+	imageCategories = sort(unique(mustGetEnvStringSlice("IMAGE_CATEGORIES", "celebration,sad,happy,angry,love,surprise,disgust,fear,neutral")))
+	resizeTargets   = sortDesc(unique(mustGetEnvIntSlice("IMAGE_SIZES", "320,256,112,56,28")))
 )
 
 func init() {
@@ -73,6 +74,11 @@ func init() {
 	if notContains(resizeTargets, 28) {
 		resizeTargets = append(resizeTargets, 28)
 	}
+
+	// sort the resize targets in descending order
+	sortPkg.Slice(resizeTargets, func(i, j int) bool {
+		return resizeTargets[i] > resizeTargets[j]
+	})
 }
 
 func main() {
@@ -158,7 +164,7 @@ func processImage(path string, results chan<- Result) {
 				continue // Skip resizing if the size is the same as the original
 			}
 
-			imgResized := resizeGIFToSquare(gifImg, size)
+			imgResized := resizeGIFToSquare(gifImg, uint(size))
 			gifBytes, err = encodeGIF(imgResized)
 			if err != nil {
 				result.Error = err
@@ -184,7 +190,7 @@ func processImage(path string, results chan<- Result) {
 				continue // Skip resizing if the size is the same as the original
 			}
 
-			imgResized := resizeToSquare(img, size)
+			imgResized := resizeToSquare(img, uint(size))
 			pngBytes, err = imageToPNG(imgResized)
 			if err != nil {
 				result.Error = err
@@ -199,7 +205,7 @@ func processImage(path string, results chan<- Result) {
 	messageParts := []openai.ChatMessagePart{
 		{
 			Type: openai.ChatMessagePartTypeText,
-			Text: promptText,
+			Text: fmt.Sprintf("%s\nImage categories: %+v", promptText, imageCategories),
 		},
 	}
 	for _, dataURI := range dataURIs {
@@ -256,8 +262,17 @@ func processImage(path string, results chan<- Result) {
 	// Place the emote name prefix on the Twitch emote name and filename
 	result.TwitchEmoteName = emoteNamePrefix + result.TwitchEmoteName
 
+	// Sort imagesBytes keys
+	imagesBytesKeys := make([]string, 0, len(imagesBytes))
+	for k := range imagesBytes {
+		imagesBytesKeys = append(imagesBytesKeys, k)
+	}
+	sortPkg.Strings(imagesBytesKeys)
+
 	// Save the images to disk
-	for key, imgBytes := range imagesBytes {
+	for _, key := range imagesBytesKeys {
+		imgBytes := imagesBytes[key]
+
 		// Determine the file extension based on the image format
 		fileExtension := "png"
 		if len(imgBytes) > 3 && imgBytes[0] == 0x47 && imgBytes[1] == 0x49 && imgBytes[2] == 0x46 { // GIF magic number
@@ -466,50 +481,4 @@ func saveResultToDisk(result Result, filename string) error {
 
 	_, err = out.Write(data)
 	return err
-}
-
-func getEnvInt(key string, fallback int) (int, error) {
-	if value, ok := os.LookupEnv(key); ok {
-		return strconv.Atoi(value)
-	}
-	return fallback, nil
-}
-
-func mustGetEnvInt(key string, fallback int) int {
-	value, err := getEnvInt(key, fallback)
-	if err != nil {
-		panic(err)
-	}
-	return value
-}
-
-func must(args ...interface{}) []interface{} {
-	argIsError := func(arg interface{}) bool {
-		if arg == nil {
-			return false
-		}
-		_, ok := arg.(error)
-		return ok
-	}
-
-	var results []interface{}
-
-	for _, arg := range args {
-		if argIsError(arg) {
-			panic(arg)
-		} else {
-			results = append(results, arg)
-		}
-	}
-
-	return results
-}
-
-func notContains[T comparable](slice []T, value T) bool {
-	for _, item := range slice {
-		if item == value {
-			return false
-		}
-	}
-	return true
 }
