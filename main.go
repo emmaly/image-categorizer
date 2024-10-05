@@ -12,6 +12,7 @@ import (
 	"image/png"
 	"os"
 	sortPkg "sort"
+	"strings"
 	"sync"
 
 	_ "github.com/joho/godotenv/autoload"
@@ -205,7 +206,7 @@ func processImage(path string, results chan<- Result) {
 	messageParts := []openai.ChatMessagePart{
 		{
 			Type: openai.ChatMessagePartTypeText,
-			Text: fmt.Sprintf("%s\nImage categories: %+v", promptText, imageCategories),
+			Text: fmt.Sprintf("Please review and understand the image. Using only the `respond` function call, provide values to all required or applicable fields. For all fields, use the largest provided image. For the field(s) pertaining to specific sizes, use the correct image matching that size. If an image is flagged as NSFW, use an emote name that clearly states NSFW. %s\nImage categories: {%s}", promptText, strings.Join(imageCategories, ",")),
 		},
 	}
 	for _, dataURI := range dataURIs {
