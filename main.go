@@ -12,7 +12,6 @@ import (
 	"image/png"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 
 	_ "github.com/joho/godotenv/autoload"
@@ -23,8 +22,7 @@ import (
 )
 
 type Response struct {
-	TwitchEmoteName      string `json:"twitchEmoteName,omitempty" required:"true" description:"Twitch emote name, must be prefixed with 'strim99' such as 'strim99Example'; if possible, use an applicable meme as the name/filename rather than the literal representation of the emote, such as 'TakeMyMoney', 'Stonks', or 'Dumpy'"`
-	Filename             string `json:"filename,omitempty" required:"true" description:"Recommended filename of the image based on the Twitch emote name; must omit the file extension"`
+	TwitchEmoteName      string `json:"twitchEmoteName,omitempty" required:"true" description:"Twitch emote name, must start with a capital letter such as 'Example'; if possible, use an applicable meme as the name/filename rather than the literal representation of the emote, such as 'TakeMyMoney', 'Stonks', or 'Dumpy'"`
 	Description          string `json:"description,omitempty" required:"true" description:"Describe the image in a short phrase"`
 	Category             string `json:"category,omitempty" required:"true" description:"Emote category; must a non-exclusive single-word adjective"`
 	NSFW                 bool   `json:"nsfw,omitempty" required:"true" description:"Indicate if the image is safe vs not safe for work"`
@@ -48,16 +46,14 @@ type Result struct {
 }
 
 var (
-	maxConcurrent   = 1 // Set the default maximum number of concurrent operations
+	maxConcurrent   = mustGetEnvInt("OPENAI_API_MAX_CONCURRENT", 1)
 	client          = openai.NewClient(os.Getenv("OPENAI_API_KEY"))
 	promptText      = os.Getenv("PROMPT_TEXT")
 	emoteNamePrefix = os.Getenv("EMOTENAME_PREFIX")
 	workingDir      = os.Getenv("WORKING_DIR")
 	responseSchema  = &jsonschema.Definition{}
-)
-
-const (
-	emoteNamePrefixPlaceholder = "strim99"
+	limiter         = NewLimiter(mustGetEnvInt("OPENAI_API_MAX_RPM", 10))
+	resizeTargets   = []uint{28, 56, 112, 256, 320}
 )
 
 func init() {
@@ -73,10 +69,9 @@ func init() {
 		panic(err)
 	}
 
-	if mc := os.Getenv("OPENAI_API_MAX_CONCURRENT"); mc != "" {
-		if n, err := strconv.Atoi(mc); err == nil {
-			maxConcurrent = n
-		}
+	// we've hardcoded sizes we want to resize to
+	if notContains(resizeTargets, 28) {
+		resizeTargets = append(resizeTargets, 28)
 	}
 }
 
@@ -95,6 +90,7 @@ func main() {
 		defer wg.Done() // Remove this loop from the WaitGroup when the goroutine completes
 
 		for _, path := range os.Args[1:] {
+			limiter.Wait()    // Wait until the limiter allows the next request
 			sem <- struct{}{} // Wait until there is room in the semaphore
 			wg.Add(1)         // Increment the WaitGroup counter
 			go func() {
@@ -141,6 +137,9 @@ func processImage(path string, results chan<- Result) {
 		return
 	}
 
+	// Original image size as string
+	originalSize := fmt.Sprintf("%dx%d", img.Bounds().Dx(), img.Bounds().Dy())
+
 	// Convert original size to PNG or GIF
 	if gifImg != nil {
 		gifBytes, err := encodeGIF(gifImg)
@@ -148,36 +147,52 @@ func processImage(path string, results chan<- Result) {
 			result.Error = err
 			return
 		}
-		imagesBytes["original"] = gifBytes
-		dataURIs = append(dataURIs, imgBytesToDataURI(gifBytes))
+		imagesBytes[originalSize] = gifBytes
+		dataURIs = append(dataURIs, imgBytesToDataURI(imagesBytes[originalSize]))
 
-		// Convert to 28x28px GIF
-		img28 := resizeGIFToSquare(gifImg, 28)
-		gifBytes, err = encodeGIF(img28)
-		if err != nil {
-			result.Error = err
-			return
+		// Convert to each size (GIF)
+		for _, size := range resizeTargets {
+			// New size as string
+			newSize := fmt.Sprintf("%dx%d", size, size)
+			if newSize == originalSize {
+				continue // Skip resizing if the size is the same as the original
+			}
+
+			imgResized := resizeGIFToSquare(gifImg, size)
+			gifBytes, err = encodeGIF(imgResized)
+			if err != nil {
+				result.Error = err
+				return
+			}
+			imagesBytes[newSize] = gifBytes
 		}
-		imagesBytes["28x28"] = gifBytes
-		dataURIs = append(dataURIs, imgBytesToDataURI(gifBytes))
+		dataURIs = append(dataURIs, imgBytesToDataURI(imagesBytes["28x28"]))
 	} else {
 		pngBytes, err := imageToPNG(img)
 		if err != nil {
 			result.Error = err
 			return
 		}
-		imagesBytes["original"] = pngBytes
-		dataURIs = append(dataURIs, imgBytesToDataURI(pngBytes))
+		imagesBytes[originalSize] = pngBytes
+		dataURIs = append(dataURIs, imgBytesToDataURI(imagesBytes[originalSize]))
 
-		// Convert to 28x28px PNG
-		img28 := resizeToSquare(img, 28)
-		pngBytes, err = imageToPNG(img28)
-		if err != nil {
-			result.Error = err
-			return
+		// Convert to each size (PNG)
+		for _, size := range resizeTargets {
+			// New size as string
+			newSize := fmt.Sprintf("%dx%d", size, size)
+			if newSize == originalSize {
+				continue // Skip resizing if the size is the same as the original
+			}
+
+			imgResized := resizeToSquare(img, size)
+			pngBytes, err = imageToPNG(imgResized)
+			if err != nil {
+				result.Error = err
+				return
+			}
+			imagesBytes[newSize] = pngBytes
 		}
-		imagesBytes["28x28"] = pngBytes
-		dataURIs = append(dataURIs, imgBytesToDataURI(pngBytes))
+		dataURIs = append(dataURIs, imgBytesToDataURI(imagesBytes["28x28"]))
 	}
 
 	// Message Parts
@@ -238,9 +253,8 @@ func processImage(path string, results chan<- Result) {
 		result.Error = err
 	}
 
-	// Replace the emote name prefix placeholder with the actual prefix
-	result.TwitchEmoteName = strings.Replace(result.TwitchEmoteName, emoteNamePrefixPlaceholder, emoteNamePrefix, 1)
-	result.Filename = strings.Replace(result.Filename, emoteNamePrefixPlaceholder, emoteNamePrefix, 1)
+	// Place the emote name prefix on the Twitch emote name and filename
+	result.TwitchEmoteName = emoteNamePrefix + result.TwitchEmoteName
 
 	// Save the images to disk
 	for key, imgBytes := range imagesBytes {
@@ -251,7 +265,7 @@ func processImage(path string, results chan<- Result) {
 		}
 
 		// Set filename
-		filename := fmt.Sprintf("%s.%s.%s", result.Filename, key, fileExtension)
+		filename := fmt.Sprintf("%s.%s.%s", result.TwitchEmoteName, key, fileExtension)
 
 		// Save the image to disk
 		if err := saveBytesToDisk(imgBytes, filename); err != nil {
@@ -264,7 +278,7 @@ func processImage(path string, results chan<- Result) {
 	}
 
 	// Save the result to disk
-	if err := saveResultToDisk(*result, fmt.Sprintf("%s.json", result.Filename)); err != nil {
+	if err := saveResultToDisk(*result, fmt.Sprintf("%s.json", result.TwitchEmoteName)); err != nil {
 		result.Error = err
 		return
 	}
@@ -452,4 +466,50 @@ func saveResultToDisk(result Result, filename string) error {
 
 	_, err = out.Write(data)
 	return err
+}
+
+func getEnvInt(key string, fallback int) (int, error) {
+	if value, ok := os.LookupEnv(key); ok {
+		return strconv.Atoi(value)
+	}
+	return fallback, nil
+}
+
+func mustGetEnvInt(key string, fallback int) int {
+	value, err := getEnvInt(key, fallback)
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
+func must(args ...interface{}) []interface{} {
+	argIsError := func(arg interface{}) bool {
+		if arg == nil {
+			return false
+		}
+		_, ok := arg.(error)
+		return ok
+	}
+
+	var results []interface{}
+
+	for _, arg := range args {
+		if argIsError(arg) {
+			panic(arg)
+		} else {
+			results = append(results, arg)
+		}
+	}
+
+	return results
+}
+
+func notContains[T comparable](slice []T, value T) bool {
+	for _, item := range slice {
+		if item == value {
+			return false
+		}
+	}
+	return true
 }
