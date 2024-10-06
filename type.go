@@ -5,6 +5,7 @@ type Response struct {
 	Description          string `json:"description,omitempty" required:"true" description:"Describe the image in a short phrase"`
 	Category             string `json:"category,omitempty" required:"true" description:"Emote category; must a non-exclusive single-word adjective"`
 	NSFW                 bool   `json:"nsfw,omitempty" required:"true" description:"Indicate if the image is safe vs not safe for work"`
+	ColorDescription     string `json:"colorDescription,omitempty" required:"true" description:"Verbose description of the key colors in the image, in plain English, using accurate detailed color names"`
 	MainColor            string `json:"mainColor,omitempty" required:"true" description:"Main color of the image in hexadecimal format"`
 	SecondaryColor       string `json:"secondaryColor,omitempty" required:"true" description:"Secondary color of the image in hexadecimal format"`
 	EmoteType            string `json:"emoteType,omitempty" required:"true" description:"Type of emote; must be one of 'static', 'animated', or 'animated-static'"`
